@@ -430,7 +430,7 @@ class PhillipsHueSkill(MycroftSkill):
     @get_group
     def handle_set_lights_color_intent(self, message, group):
         color_name = message.data.get('color')
-        (hue, sat, ct) = self.colors[color_name]
+        (hue, sat) = self.colors[color_name]
         for light in group.lights:
             light.hue = hue
             light.saturation = sat
