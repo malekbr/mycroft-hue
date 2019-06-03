@@ -29,6 +29,10 @@ from phue import PhueRequestTimeout
 from time import sleep
 from requests import ConnectionError
 from requests import get
+import upnpclient
+import urllib
+from fuzzywuzzy import process
+from rgbxy import Converter, get_light_gamut
 
 import socket
 
@@ -91,6 +95,21 @@ def intent_handler(handler_function):
                     raise
     return handler
 
+def get_group(f):
+    def inner (self, message):
+        group_name = message.data.get('group')
+
+        if group_name is None:
+            group_name = "default group"
+            group = self.default_group
+        else:
+            group = self._find_group(group_name)
+        if group is None:
+            self.speak_dialog('could.not.find.group', {'name': group_name})
+        else:
+            f(self, message, group)
+    return inner
+
 
 class PhillipsHueSkill(MycroftSkill):
 
@@ -107,6 +126,17 @@ class PhillipsHueSkill(MycroftSkill):
             verbose = verbose.lower()
             verbose = True if verbose == 'true' else False
         self.verbose = verbose
+        converter = Converter()
+        self.colors = {
+                "red":    (65160, 254),
+                "green":  (27975, 254),
+                "blue":   (45908, 254),
+                "pink":   (52673, 254),
+                "violet": (48156, 254),
+                "yellow": (10821, 254),
+                "orange": ( 6308, 254),
+                "white":  (41439,  81),
+                }
 
         self.username = self.settings.get('username')
         if self.username == '':
@@ -181,7 +211,8 @@ class PhillipsHueSkill(MycroftSkill):
         if self.user_supplied_ip:
             self.ip = self.settings.get('ip')
         else:
-            self.ip = _discover_bridge()
+            device = next(filter(lambda device : "Philips hue" in device.model_name, upnpclient.discover()))
+            self.ip = urllib.parse.urlparse(device.location).hostname
         if self.username:
             url = 'http://{ip}/api/{user}'.format(ip=self.ip,
                                                   user=self.username)
@@ -313,69 +344,80 @@ class PhillipsHueSkill(MycroftSkill):
                 # Swallow it for now; _connect_to_bridge will deal with it
                 pass
 
-        toggle_intent = IntentBuilder("ToggleIntent") \
-            .one_of("OffKeyword", "OnKeyword") \
-            .one_of("Group", "LightsKeyword") \
-            .build()
-        self.register_intent(toggle_intent, self.handle_toggle_intent)
+        self.register_intent_file("turn.on.intent", self.handle_turn_on_intent)
+        self.register_intent_file("turn.off.intent", self.handle_turn_off_intent)
+        self.register_intent_file("set.lights.intent", self.handle_set_lights_brightness_intent)
+        self.register_intent_file("set.lights.scene.intent", self.handle_set_lights_scene_intent)
+        self.register_intent_file("set.lights.color.intent", self.handle_set_lights_color_intent)
 
-        activate_scene_intent = IntentBuilder("ActivateSceneIntent") \
-            .require("Scene") \
-            .one_of("Group", "LightsKeyword") \
-            .build()
-        self.register_intent(activate_scene_intent,
-                             self.handle_activate_scene_intent)
+        # adjust_brightness_intent = IntentBuilder("AdjustBrightnessIntent") \
+        #     .one_of("IncreaseKeyword", "DecreaseKeyword", "DimKeyword") \
+        #     .one_of("Group", "LightsKeyword") \
+        #     .optionally("BrightnessKeyword") \
+        #     .build()
+        # self.register_intent(adjust_brightness_intent,
+        #                      self.handle_adjust_brightness_intent)
 
-        adjust_brightness_intent = IntentBuilder("AdjustBrightnessIntent") \
-            .one_of("IncreaseKeyword", "DecreaseKeyword", "DimKeyword") \
-            .one_of("Group", "LightsKeyword") \
-            .optionally("BrightnessKeyword") \
-            .build()
-        self.register_intent(adjust_brightness_intent,
-                             self.handle_adjust_brightness_intent)
+        # adjust_color_temperature_intent = \
+        #     IntentBuilder("AdjustColorTemperatureIntent") \
+        #     .one_of("IncreaseKeyword", "DecreaseKeyword") \
+        #     .one_of("Group", "LightsKeyword") \
+        #     .require("ColorTemperatureKeyword") \
+        #     .build()
+        # self.register_intent(adjust_color_temperature_intent,
+        #                      self.handle_adjust_color_temperature_intent)
 
-        set_brightness_intent = IntentBuilder("SetBrightnessIntent") \
-            .require("Value") \
-            .one_of("Group", "LightsKeyword") \
-            .optionally("BrightnessKeyword") \
-            .build()
-        self.register_intent(set_brightness_intent,
-                             self.handle_set_brightness_intent)
+        # connect_lights_intent = \
+        #     IntentBuilder("ConnectLightsIntent") \
+        #     .require("ConnectKeyword") \
+        #     .one_of("Group", "LightsKeyword") \
+        #     .build()
+        # self.register_intent(connect_lights_intent,
+        #                      self.handle_connect_lights_intent)
 
-        adjust_color_temperature_intent = \
-            IntentBuilder("AdjustColorTemperatureIntent") \
-            .one_of("IncreaseKeyword", "DecreaseKeyword") \
-            .one_of("Group", "LightsKeyword") \
-            .require("ColorTemperatureKeyword") \
-            .build()
-        self.register_intent(adjust_color_temperature_intent,
-                             self.handle_adjust_color_temperature_intent)
+    def _find_fuzzy(self, dictionary, value):
+        result = process.extractOne(value, dictionary.keys())
+        if result is None:
+            return None
+        (value, confidence) = result
+        if confidence < 60:
+            return None
+        else:
+            return dictionary[value]
 
-        connect_lights_intent = \
-            IntentBuilder("ConnectLightsIntent") \
-            .require("ConnectKeyword") \
-            .one_of("Group", "LightsKeyword") \
-            .build()
-        self.register_intent(connect_lights_intent,
-                             self.handle_connect_lights_intent)
+    def _find_group(self, group_name):
+        group_id = self._find_fuzzy(self.groups_to_ids_map, group_name)
+        if group_id is not None:
+            return Group(self.bridge, group_id)
 
-    @intent_handler
-    def handle_toggle_intent(self, message, group):
-        if "OffKeyword" in message.data:
-            dialog = 'turn.off'
+    @get_group
+    def handle_turn_on_intent(self, message, group):
+        group.on = True
+
+    @get_group
+    def handle_turn_off_intent(self, message, group):
+        group.on = False
+
+    @get_group
+    def handle_set_lights_brightness_intent(self, message, group):
+        value = message.data.get('percent')
+        value = int(value.rstrip('%'))
+        if value == 0:
             group.on = False
         else:
-            dialog = 'turn.on'
+            brightness = int(value / 100.0 * 254)
             group.on = True
+            group.brightness = brightness
         if self.verbose:
-            self.speak_dialog(dialog)
+            self.speak_dialog('set.brightness', {'brightness': value})
 
-    @intent_handler
-    def handle_activate_scene_intent(self, message, group):
-        scene_name = message.data['Scene'].lower()
-        scene_id = self.scenes_to_ids_map[group.group_id].get(scene_name)
+
+    @get_group
+    def handle_set_lights_scene_intent(self, message, group):
+        scene_name = message.data.get('scene')
+        scene_id = self._find_fuzzy(self.scenes_to_ids_map[group.group_id], scene_name)
         if not scene_id:
-            scene_id = self.scenes_to_ids_map[None].get(scene_name)
+            scene_id = self._find_fuzzy(self.scenes_to_ids_map[None], scene_name)
         if scene_id:
             if self.verbose:
                 self.speak_dialog('activate.scene',
@@ -385,54 +427,57 @@ class PhillipsHueSkill(MycroftSkill):
             self.speak_dialog('scene.not.found',
                               {'scene': scene_name})
 
-    @intent_handler
-    def handle_adjust_brightness_intent(self, message, group):
-        if "IncreaseKeyword" in message.data:
-            brightness = group.brightness + self.brightness_step
-            group.brightness = \
-                brightness if brightness < 255 else 254
-            dialog = 'increase.brightness'
-        else:
-            brightness = group.brightness - self.brightness_step
-            group.brightness = brightness if brightness > 0 else 0
-            dialog = 'decrease.brightness'
-        if self.verbose:
-            self.speak_dialog(dialog)
+    @get_group
+    def handle_set_lights_color_intent(self, message, group):
+        color_name = message.data.get('color')
+        (hue, sat, ct) = self.colors[color_name]
+        for light in group.lights:
+            light.hue = hue
+            light.saturation = sat
 
-    @intent_handler
-    def handle_set_brightness_intent(self, message, group):
-        value = int(message.data['Value'].rstrip('%'))
-        brightness = int(value / 100.0 * 254)
-        group.on = True
-        group.brightness = brightness
-        if self.verbose:
-            self.speak_dialog('set.brightness', {'brightness': value})
+    # TODO support
+    # @intent_handler
+    # def handle_adjust_brightness_intent(self, message, group):
+    #     if "IncreaseKeyword" in message.data:
+    #         brightness = group.brightness + self.brightness_step
+    #         group.brightness = \
+    #             brightness if brightness < 255 else 254
+    #         dialog = 'increase.brightness'
+    #     else:
+    #         brightness = group.brightness - self.brightness_step
+    #         group.brightness = brightness if brightness > 0 else 0
+    #         dialog = 'decrease.brightness'
+    #     if self.verbose:
+    #         self.speak_dialog(dialog)
 
-    @intent_handler
-    def handle_adjust_color_temperature_intent(self, message, group):
-        if "IncreaseKeyword" in message.data:
-            color_temperature = \
-                group.colortemp_k + self.color_temperature_step
-            group.colortemp_k = \
-                color_temperature if color_temperature < 6500 else 6500
-            dialog = 'increase.color.temperature'
-        else:
-            color_temperature = \
-                group.colortemp_k - self.color_temperature_step
-            group.colortemp_k = \
-                color_temperature if color_temperature > 2000 else 2000
-            dialog = 'decrease.color.temperature'
-        if self.verbose:
-            self.speak_dialog(dialog)
 
-    @intent_handler
-    def handle_connect_lights_intent(self, message, group):
-        if self.user_supplied_ip:
-            self.speak_dialog('ip.in.config')
-            return
-        if self.verbose:
-            self.speak_dialog('connecting')
-        self._connect_to_bridge(acknowledge_successful_connection=True)
+    # TODO support
+    # @intent_handler
+    # def handle_adjust_color_temperature_intent(self, message, group):
+    #     if "IncreaseKeyword" in message.data:
+    #         color_temperature = \
+    #             group.colortemp_k + self.color_temperature_step
+    #         group.colortemp_k = \
+    #             color_temperature if color_temperature < 6500 else 6500
+    #         dialog = 'increase.color.temperature'
+    #     else:
+    #         color_temperature = \
+    #             group.colortemp_k - self.color_temperature_step
+    #         group.colortemp_k = \
+    #             color_temperature if color_temperature > 2000 else 2000
+    #         dialog = 'decrease.color.temperature'
+    #     if self.verbose:
+    #         self.speak_dialog(dialog)
+
+    # TODO support
+    # @intent_handler
+    # def handle_connect_lights_intent(self, message, group):
+    #     if self.user_supplied_ip:
+    #         self.speak_dialog('ip.in.config')
+    #         return
+    #     if self.verbose:
+    #         self.speak_dialog('connecting')
+    #     self._connect_to_bridge(acknowledge_successful_connection=True)
 
     def stop(self):
         pass
@@ -466,6 +511,7 @@ def _discover_bridge():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(5.0)
     sock.sendto(ssdpRequest.encode(), (SSDP_ADDR, SSDP_PORT))
+    print("running discover bridge")
     try:
         result = sock.recv(4096).decode()
         lines = result.splitlines()
