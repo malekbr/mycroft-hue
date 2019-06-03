@@ -432,6 +432,7 @@ class PhillipsHueSkill(MycroftSkill):
         color_name = message.data.get('color')
         (hue, sat) = self.colors[color_name]
         for light in group.lights:
+            light.on = True
             light.hue = hue
             light.saturation = sat
 
