@@ -1,1 +1,1 @@
-set ({group}|) (light|lights) scene to {scene}
+set ({group}|) (light|lights) (seen|scene) to {scene}

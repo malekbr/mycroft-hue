@@ -104,6 +104,9 @@ def get_group(f):
             group = self.default_group
         else:
             group = self._find_group(group_name)
+        if group is None and group_name == "the":
+            group_name = "default group"
+            group = self.default_group
         if group is None:
             self.speak_dialog('could.not.find.group', {'name': group_name})
         else:
